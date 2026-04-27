@@ -57,6 +57,7 @@ from ..base_authenticated_tool import BaseAuthenticatedTool
 from ..tool_context import ToolContext
 from .mcp_session_manager import MCPSessionManager
 from .mcp_session_manager import retry_on_errors
+from .mcp_session_manager import StreamableHTTPConnectionParams
 from .session_context import SessionContext
 
 logger = logging.getLogger("google_adk." + __name__)
@@ -148,6 +149,7 @@ class McpTool(BaseAuthenticatedTool):
       progress_callback: Optional[
           Union[ProgressFnT, ProgressCallbackFactory]
       ] = None,
+      use_isolated_event_loop: bool = False,
   ):
     """Initializes an McpTool.
 
@@ -175,8 +177,18 @@ class McpTool(BaseAuthenticatedTool):
             returns a ProgressFnT or None. This allows callbacks to access
             and modify runtime context like session state.
 
+        use_isolated_event_loop: When ``True``, each tool call runs in a
+          dedicated thread with an isolated ``asyncio`` event loop. This avoids
+          the anyio ``CancelScope`` cross-task error that occurs on Vertex AI
+          Agent Engine when using ``StreamableHTTPConnectionParams``. Only
+          supported with ``StreamableHTTPConnectionParams``; raises
+          ``ValueError`` for other transport types. Note: ``progress_callback``
+          is not invoked in this mode.
+
     Raises:
-        ValueError: If mcp_tool or mcp_session_manager is None.
+        ValueError: If mcp_tool or mcp_session_manager is None, or if
+          ``use_isolated_event_loop=True`` is combined with a non-streamable-
+          HTTP transport.
     """
 
     # --- BEGIN BOUND TOKEN PATCH ---
@@ -197,11 +209,25 @@ class McpTool(BaseAuthenticatedTool):
         if auth_scheme
         else None,
     )
+    if use_isolated_event_loop and not isinstance(
+        mcp_session_manager.connection_params, StreamableHTTPConnectionParams
+    ):
+      raise ValueError(
+          "use_isolated_event_loop=True is only supported with"
+          " StreamableHTTPConnectionParams."
+      )
+
     self._mcp_tool = mcp_tool
     self._mcp_session_manager = mcp_session_manager
     self._require_confirmation = require_confirmation
     self._header_provider = header_provider
     self._progress_callback = progress_callback
+    self._use_isolated_event_loop = use_isolated_event_loop
+    self._server_url: Optional[str] = (
+        mcp_session_manager.connection_params.url
+        if use_isolated_event_loop
+        else None
+    )
 
   @override
   def _get_declaration(self) -> FunctionDeclaration:
@@ -396,6 +422,20 @@ class McpTool(BaseAuthenticatedTool):
     if dynamic_headers:
       headers.update(dynamic_headers)
     final_headers = headers if headers else None
+
+    if self._use_isolated_event_loop:
+      # Run in a dedicated thread with an isolated event loop to avoid the
+      # anyio CancelScope cross-task error on Vertex AI Agent Engine.
+      # See mcp_thread_utils.py for the full explanation.
+      from .mcp_thread_utils import call_tool_in_thread  # pylint: disable=g-import-not-at-top
+
+      return await asyncio.to_thread(
+          call_tool_in_thread,
+          self._server_url,
+          self.name,
+          args,
+          final_headers,
+      )
 
     # Propagate trace context in the _meta field as sprcified by MCP protocol.
     # See https://agentclientprotocol.com/protocol/extensibility#the-meta-field

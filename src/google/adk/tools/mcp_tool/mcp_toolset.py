@@ -118,6 +118,7 @@ class McpToolset(BaseToolset):
       use_mcp_resources: Optional[bool] = False,
       sampling_callback: Optional[SamplingFnT] = None,
       sampling_capabilities: Optional[SamplingCapability] = None,
+      use_isolated_event_loop: bool = False,
   ):
     """Initializes the McpToolset.
 
@@ -157,6 +158,14 @@ class McpToolset(BaseToolset):
       sampling_callback: Optional callback to handle sampling requests from the
         MCP server.
       sampling_capabilities: Optional capabilities for sampling.
+      use_isolated_event_loop: When ``True``, each MCP operation (tool
+        discovery and tool calls) runs in a dedicated thread with an isolated
+        ``asyncio`` event loop. This avoids the anyio ``CancelScope`` cross-task
+        error that occurs on Vertex AI Agent Engine when using
+        ``StreamableHTTPConnectionParams``. Only supported with
+        ``StreamableHTTPConnectionParams``; raises ``ValueError`` for other
+        transport types. Note: ``progress_callback`` and MCP sampling are not
+        invoked in this mode.
     """
 
     # --- BEGIN BOUND TOKEN PATCH ---
@@ -175,6 +184,14 @@ class McpToolset(BaseToolset):
 
     if not connection_params:
       raise ValueError("Missing connection params in McpToolset.")
+
+    if use_isolated_event_loop and not isinstance(
+        connection_params, StreamableHTTPConnectionParams
+    ):
+      raise ValueError(
+          "use_isolated_event_loop=True is only supported with"
+          " StreamableHTTPConnectionParams."
+      )
 
     self._connection_params = connection_params
     self._errlog = errlog
@@ -202,6 +219,7 @@ class McpToolset(BaseToolset):
         else None
     )
     self._use_mcp_resources = use_mcp_resources
+    self._use_isolated_event_loop = use_isolated_event_loop
 
   def _get_auth_headers(
       self, readonly_context: Optional[ReadonlyContext] = None
@@ -340,6 +358,43 @@ class McpToolset(BaseToolset):
     Returns:
         List[BaseTool]: A list of tools available under the specified context.
     """
+    if self._use_isolated_event_loop:
+      # Discover tools via an isolated thread to avoid the anyio CancelScope
+      # cross-task error on Vertex AI Agent Engine.
+      # See mcp_thread_utils.py for the full explanation.
+      from .mcp_thread_utils import list_tools_in_thread  # pylint: disable=g-import-not-at-top
+
+      headers: Dict[str, str] = {}
+      auth_headers = self._get_auth_headers(readonly_context)
+      if auth_headers:
+        headers.update(auth_headers)
+      if self._header_provider and readonly_context:
+        provider_headers = self._header_provider(readonly_context)
+        if provider_headers:
+          headers.update(provider_headers)
+
+      raw_tools = await asyncio.to_thread(
+          list_tools_in_thread,
+          self._connection_params.url,
+          headers or None,
+      )
+      tools = []
+      for tool in raw_tools:
+        mcp_tool = MCPTool(
+            mcp_tool=tool,
+            mcp_session_manager=self._mcp_session_manager,
+            auth_scheme=self._auth_scheme,
+            auth_credential=self._auth_credential,
+            require_confirmation=self._require_confirmation,
+            header_provider=self._header_provider,
+            use_isolated_event_loop=True,
+        )
+        if self._is_tool_selected(mcp_tool, readonly_context):
+          tools.append(mcp_tool)
+      if self._use_mcp_resources:
+        tools.append(LoadMcpResourceTool(mcp_toolset=self))
+      return tools
+
     # Fetch available tools from the MCP server
     tools_response: ListToolsResult = await self._execute_with_session(
         lambda session: session.list_tools(),
