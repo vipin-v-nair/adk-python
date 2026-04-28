@@ -358,6 +358,7 @@ class McpToolset(BaseToolset):
     Returns:
         List[BaseTool]: A list of tools available under the specified context.
     """
+
     if self._use_isolated_event_loop:
       # Discover tools via an isolated thread to avoid the anyio CancelScope
       # cross-task error on Vertex AI Agent Engine.
@@ -373,6 +374,9 @@ class McpToolset(BaseToolset):
         if provider_headers:
           headers.update(provider_headers)
 
+      assert isinstance(
+          self._connection_params, StreamableHTTPConnectionParams
+      )
       raw_tools = await asyncio.to_thread(
           list_tools_in_thread,
           self._connection_params.url,
@@ -389,12 +393,15 @@ class McpToolset(BaseToolset):
             header_provider=self._header_provider,
             use_isolated_event_loop=True,
         )
-        if self._is_tool_selected(mcp_tool, readonly_context):
+        if readonly_context is None or self._is_tool_selected(
+            mcp_tool, readonly_context
+        ):
           tools.append(mcp_tool)
       if self._use_mcp_resources:
         tools.append(LoadMcpResourceTool(mcp_toolset=self))
+      if self._use_mcp_resources:
+        tools.append(LoadMcpResourceTool(mcp_toolset=self))
       return tools
-
     # Fetch available tools from the MCP server
     tools_response: ListToolsResult = await self._execute_with_session(
         lambda session: session.list_tools(),
