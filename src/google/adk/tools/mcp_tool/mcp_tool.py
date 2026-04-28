@@ -176,7 +176,7 @@ class McpTool(BaseAuthenticatedTool):
             The factory receives (tool_name, callback_context, **kwargs) and
             returns a ProgressFnT or None. This allows callbacks to access
             and modify runtime context like session state.
-
+            
         use_isolated_event_loop: When ``True``, each tool call runs in a
           dedicated thread with an isolated ``asyncio`` event loop. This avoids
           the anyio ``CancelScope`` cross-task error that occurs on Vertex AI
@@ -210,7 +210,7 @@ class McpTool(BaseAuthenticatedTool):
         else None,
     )
     if use_isolated_event_loop and not isinstance(
-        mcp_session_manager.connection_params, StreamableHTTPConnectionParams
+        mcp_session_manager._connection_params, StreamableHTTPConnectionParams
     ):
       raise ValueError(
           "use_isolated_event_loop=True is only supported with"
@@ -223,11 +223,11 @@ class McpTool(BaseAuthenticatedTool):
     self._header_provider = header_provider
     self._progress_callback = progress_callback
     self._use_isolated_event_loop = use_isolated_event_loop
-    self._server_url: Optional[str] = (
-        mcp_session_manager.connection_params.url
-        if use_isolated_event_loop
-        else None
-    )
+    self._server_url: Optional[str] = None
+    if use_isolated_event_loop and isinstance(
+        mcp_session_manager._connection_params, StreamableHTTPConnectionParams
+    ):
+      self._server_url = mcp_session_manager._connection_params.url
 
   @override
   def _get_declaration(self) -> FunctionDeclaration:
@@ -429,6 +429,7 @@ class McpTool(BaseAuthenticatedTool):
       # See mcp_thread_utils.py for the full explanation.
       from .mcp_thread_utils import call_tool_in_thread  # pylint: disable=g-import-not-at-top
 
+      assert self._server_url is not None
       return await asyncio.to_thread(
           call_tool_in_thread,
           self._server_url,
@@ -616,7 +617,8 @@ class McpTool(BaseAuthenticatedTool):
               )
           }
       elif credential.service_account:
-        # Service accounts should be exchanged for access tokens before reaching this point
+        # Service accounts should be exchanged for access tokens before
+        # reaching this point
         logger.warning(
             "Service account credentials should be exchanged before MCP"
             " session creation"
