@@ -38,13 +38,15 @@ Trade-offs
   and ``header_provider`` on ``McpToolset`` remain functional.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
-from typing import Any
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from mcp import types
+from mcp.client import streamable_http
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
 
 
 def _cancel_pending(loop: asyncio.AbstractEventLoop) -> None:
@@ -59,8 +61,8 @@ def _cancel_pending(loop: asyncio.AbstractEventLoop) -> None:
 
 def list_tools_in_thread(
     url: str,
-    headers: Optional[dict] = None,
-) -> list:
+    headers: Optional[Dict[str, str]] = None,
+) -> list[Any]:
   """Return tools/list results from an MCP server via an isolated event loop.
 
   Opens a fresh connection for every call; must be invoked from a non-async
@@ -76,7 +78,11 @@ def list_tools_in_thread(
 
   async def _async():
     kwargs = {"headers": headers} if headers else {}
-    async with streamablehttp_client(url, **kwargs) as (read, write, _):
+    async with streamable_http.streamable_http_client(url, **kwargs) as (
+        read,
+        write,
+        _,
+    ):
       async with ClientSession(read, write) as session:
         await session.initialize()
         result = await session.list_tools()
@@ -94,8 +100,8 @@ def list_tools_in_thread(
 def call_tool_in_thread(
     url: str,
     tool_name: str,
-    arguments: dict,
-    headers: Optional[dict] = None,
+    arguments: Dict[str, Any],
+    headers: Optional[Dict[str, str]] = None,
 ) -> Any:
   """Call an MCP tool via an isolated event loop and return the parsed result.
 
@@ -117,7 +123,11 @@ def call_tool_in_thread(
 
   async def _async():
     kwargs = {"headers": headers} if headers else {}
-    async with streamablehttp_client(url, **kwargs) as (read, write, _):
+    async with streamable_http.streamable_http_client(url, **kwargs) as (
+        read,
+        write,
+        _,
+    ):
       async with ClientSession(read, write) as session:
         await session.initialize()
         result = await session.call_tool(tool_name, arguments)
@@ -126,12 +136,15 @@ def call_tool_in_thread(
               f"MCP tool '{tool_name}' returned an error: {result.content}"
           )
         if result.content:
-          text = result.content[0].text
-          try:
-            return json.loads(text)
-          except (json.JSONDecodeError, AttributeError):
-            return {"text": text}
+          first = result.content[0]
+          if isinstance(first, types.TextContent):
+            try:
+              return json.loads(first.text)
+            except json.JSONDecodeError:
+              return {"text": first.text}
+          return {"content": str(first)}
         return {}
+
 
   loop = asyncio.new_event_loop()
   asyncio.set_event_loop(loop)
