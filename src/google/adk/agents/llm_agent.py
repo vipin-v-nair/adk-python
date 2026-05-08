@@ -853,6 +853,17 @@ class LlmAgent(BaseAgent):
     # Handle text responses
     if event.is_final_response() and event.content and event.content.parts:
 
+      # Skip if no text parts at all to avoid overwriting state_delta values
+      # already set (e.g. after_tool_callback with skip_summarization
+      # on function_response-only events).
+      has_text_part = any(
+          part.text is not None and not part.thought
+          for part in event.content.parts
+      )
+
+      if not has_text_part:
+        return
+
       result = ''.join(
           part.text
           for part in event.content.parts
@@ -865,12 +876,6 @@ class LlmAgent(BaseAgent):
         if not result.strip():
           return
         result = validate_schema(self.output_schema, result)
-      elif not result:
-        # No text parts found and no output_schema. Skip to avoid
-        # overwriting state_delta values already set by callbacks
-        # (e.g. after_tool_callback with skip_summarization on
-        # function_response-only events).
-        return
       event.actions.state_delta[self.output_key] = result
 
   def __maybe_accumulate_streaming_output(
